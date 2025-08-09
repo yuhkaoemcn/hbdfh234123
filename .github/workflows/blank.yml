@@ -50,37 +50,45 @@ jobs:
       - name: Enhanced system setup
         run: |
           set -e
-          # System updates
+          # System updates with fixes
           sudo apt-get update -y
           sudo apt-get install -y curl wget gnupg2 software-properties-common
+          
+          # Fix broken packages first
+          sudo apt-get install -f -y || true
+          sudo dpkg --configure -a || true
           
           # Docker sanity check
           docker --version
           
-          # Install Chrome dependencies for headless mode
-          sudo apt-get install -y \
-            libnss3-dev \
-            libatk-bridge2.0-dev \
-            libdrm-dev \
-            libxcomposite-dev \
-            libxdamage-dev \
-            libxrandr-dev \
-            libgbm-dev \
-            libxss-dev \
-            libasound2-dev \
+          # Install Chrome dependencies with fixed approach
+          sudo apt-get install -y --fix-missing --no-install-recommends \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libgbm1 \
+            libxss1 \
             libatspi2.0-0 \
             libgtk-3-0 \
             libgdk-pixbuf2.0-0 \
             libxfixes3 \
             libxinerama1 \
-            libxrandr2 \
-            libasound2 \
             libpangocairo-1.0-0 \
             libcairo-gobject2 \
-            libgdk-pixbuf2.0-0 \
-            libgtk-3-0 \
-            libgbm1
+            fonts-liberation \
+            libappindicator3-1 \
+            xdg-utils
             
+          # Try to install libasound2 separately (the problematic one)
+          sudo apt-get install -y libasound2 || {
+            echo "libasound2 installation failed, trying alternative approach..."
+            sudo apt-get install -y --fix-broken || true
+            sudo apt-get install -y alsa-base alsa-utils || true
+          }
+          
           # Set Chrome/Chromium environment for headless
           export CHROME_BIN=/usr/bin/google-chrome-stable
           export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
@@ -88,7 +96,7 @@ jobs:
           
           # Chrome memory ve resource limits
           echo 'vm.max_map_count=262144' | sudo tee -a /etc/sysctl.conf
-          sudo sysctl -p
+          sudo sysctl -p || true
           
       - name: Setup Node.js 20 with enhanced config
         uses: actions/setup-node@v4
@@ -96,21 +104,58 @@ jobs:
           node-version: '20'
           cache: 'npm'
           
-      - name: Pre-install Node dependencies globally
+      - name: Pre-install Node dependencies with fallbacks
         run: |
-          # Global olarak hızlı install
-          npm install -g puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+          set -e
           
-          # Puppeteer için Chrome download
-          npx puppeteer install chrome || npx puppeteer browsers install chrome
+          # Node.js package cache clear
+          npm cache clean --force || true
+          
+          # Try global install first
+          npm install -g puppeteer puppeteer-extra puppeteer-extra-plugin-stealth --unsafe-perm=true || {
+            echo "Global install failed, trying local approach..."
+            
+            # Create a temp directory for local install
+            mkdir -p /tmp/node-deps
+            cd /tmp/node-deps
+            npm init -y
+            npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth --no-save
+            
+            # Add to NODE_PATH
+            echo "NODE_PATH=/tmp/node-deps/node_modules:$NODE_PATH" >> $GITHUB_ENV
+          }
+          
+          # Puppeteer Chrome download with multiple attempts
+          npx puppeteer install chrome || \
+          npx puppeteer browsers install chrome || \
+          npm install puppeteer --unsafe-perm=true || {
+            echo "Puppeteer Chrome install failed, will use system Chrome"
+            
+            # Try to install Google Chrome manually
+            wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add - || true
+            echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list || true
+            sudo apt-get update -y || true
+            sudo apt-get install -y google-chrome-stable || true
+          }
           
       - name: Setup virtual display for headless Chrome
         run: |
-          # Xvfb kurulumu (headless display)
-          sudo apt-get install -y xvfb
+          # Xvfb kurulumu (headless display) with error handling
+          sudo apt-get install -y xvfb || {
+            echo "Xvfb installation failed, trying alternative..."
+            sudo apt-get install -y xserver-xorg-video-dummy || true
+          }
+          
           export DISPLAY=:99
-          Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -dpi 96 > /dev/null 2>&1 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
+          
+          # Wait for Xvfb to start
+          sleep 3
+          
+          # Test display
+          echo "Testing display..."
+          DISPLAY=:99 xdpyinfo || echo "Display test failed but continuing..."
           
       - name: Docker resource optimization
         run: |
