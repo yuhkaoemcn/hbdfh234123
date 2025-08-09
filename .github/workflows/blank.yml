@@ -1,4 +1,4 @@
-name: Run Private park.sh with accounts.txt (masked)
+name: wgsddssadfsd
 
 on:
   workflow_dispatch:
@@ -32,10 +32,10 @@ jobs:
           path: .priv
           persist-credentials: false
 
-      - name: Preflight
+      - name: Preflight (no docker reinstall)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y curl docker.io
+          sudo apt-get install -y curl
           docker --version
 
       - name: Run park.sh with accounts.txt (quiet)
