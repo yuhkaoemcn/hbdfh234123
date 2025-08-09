@@ -102,40 +102,80 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+          # Remove cache to avoid lock file issues
           
       - name: Pre-install Node dependencies with fallbacks
         run: |
           set -e
           
-          # Node.js package cache clear
+          # Clear all npm caches and configs
           npm cache clean --force || true
+          rm -rf ~/.npm || true
+          rm -rf /home/runner/.npm || true
+          rm -rf node_modules package-lock.json yarn.lock || true
           
-          # Try global install first
-          npm install -g puppeteer puppeteer-extra puppeteer-extra-plugin-stealth --unsafe-perm=true || {
-            echo "Global install failed, trying local approach..."
-            
-            # Create a temp directory for local install
-            mkdir -p /tmp/node-deps
-            cd /tmp/node-deps
-            npm init -y
-            npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth --no-save
-            
-            # Add to NODE_PATH
-            echo "NODE_PATH=/tmp/node-deps/node_modules:$NODE_PATH" >> $GITHUB_ENV
+          # Set npm to ignore lockfiles and use latest versions
+          npm config set package-lock false
+          npm config set shrinkwrap false
+          npm config set fund false
+          npm config set audit false
+          
+          # Create clean working directory
+          mkdir -p /tmp/puppeteer-setup
+          cd /tmp/puppeteer-setup
+          
+          # Initialize fresh package.json
+          echo '{"name":"puppeteer-setup","version":"1.0.0","main":"index.js"}' > package.json
+          
+          # Install dependencies one by one with specific versions
+          echo "Installing puppeteer..."
+          npm install puppeteer@21.6.1 --no-package-lock --no-shrinkwrap --no-save || {
+            echo "Puppeteer install failed, trying older version..."
+            npm install puppeteer@19.11.1 --no-package-lock --no-shrinkwrap --no-save || {
+              echo "Still failed, trying without version constraint..."
+              npm install puppeteer --no-package-lock --no-shrinkwrap --no-save
+            }
           }
           
-          # Puppeteer Chrome download with multiple attempts
-          npx puppeteer install chrome || \
-          npx puppeteer browsers install chrome || \
-          npm install puppeteer --unsafe-perm=true || {
-            echo "Puppeteer Chrome install failed, will use system Chrome"
+          # Try puppeteer-extra (optional)
+          echo "Installing puppeteer-extra..."
+          npm install puppeteer-extra --no-package-lock --no-shrinkwrap --no-save || {
+            echo "puppeteer-extra failed, will use basic puppeteer"
+          }
+          
+          # Try stealth plugin (optional)
+          echo "Installing stealth plugin..."
+          npm install puppeteer-extra-plugin-stealth --no-package-lock --no-shrinkwrap --no-save || {
+            echo "stealth plugin failed, will use basic puppeteer"
+          }
+          
+          # Set NODE_PATH for global access
+          echo "NODE_PATH=/tmp/puppeteer-setup/node_modules:$NODE_PATH" >> $GITHUB_ENV
+          echo "PUPPETEER_SETUP_DIR=/tmp/puppeteer-setup" >> $GITHUB_ENV
+          
+          # Try Puppeteer Chrome download with multiple approaches
+          echo "Setting up Chrome for Puppeteer..."
+          cd /tmp/puppeteer-setup
+          node -e "
+            try {
+              const puppeteer = require('puppeteer');
+              console.log('Puppeteer loaded successfully');
+            } catch(e) {
+              console.log('Puppeteer load failed:', e.message);
+              process.exit(1);
+            }
+          " || {
+            echo "Puppeteer test failed, trying manual Chrome installation..."
             
-            # Try to install Google Chrome manually
+            # Manual Chrome installation
             wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add - || true
             echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list || true
             sudo apt-get update -y || true
             sudo apt-get install -y google-chrome-stable || true
+            
+            # Set Chrome path
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable" >> $GITHUB_ENV
           }
           
       - name: Setup virtual display for headless Chrome
