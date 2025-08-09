@@ -1,5 +1,4 @@
 name: Run Private park.sh (quiet, masked, 50 runners)
-
 on:
   workflow_dispatch:
     inputs:
@@ -10,14 +9,20 @@ on:
         description: "EU,AM,... (15 adet; boşsa default)"
         required: false
         default: "EU,AM,EU,AM,EU,AM,EU,AM,EU,AM,EU,AM,EU,AM,EU"
-
+      headless_mode:
+        description: "Headless mode (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 370
+    timeout-minutes: 400  # Biraz artırdım çünkü setup süreci daha uzun
     permissions:
       contents: read
-
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +31,6 @@ jobs:
                        20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
                        30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
                        40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
-
     steps:
       - name: Mask inputs in logs
         run: |
@@ -34,7 +38,7 @@ jobs:
           echo "::add-mask::${{ inputs.countries }}"
           echo "::add-mask::TARGET_URL=${{ inputs.url }}"
           echo "::add-mask::COUNTRIES=${{ inputs.countries }}"
-
+          
       - name: Checkout private repo (read-only)
         uses: actions/checkout@v4
         with:
@@ -42,44 +46,155 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: .priv
           persist-credentials: false
-
-      - name: Preflight (deps & docker sanity)
+          
+      - name: Enhanced system setup
         run: |
           set -e
+          # System updates
           sudo apt-get update -y
-          sudo apt-get install -y curl
+          sudo apt-get install -y curl wget gnupg2 software-properties-common
+          
+          # Docker sanity check
           docker --version
-
-      - name: Setup Node.js 20
+          
+          # Install Chrome dependencies for headless mode
+          sudo apt-get install -y \
+            libnss3-dev \
+            libatk-bridge2.0-dev \
+            libdrm-dev \
+            libxcomposite-dev \
+            libxdamage-dev \
+            libxrandr-dev \
+            libgbm-dev \
+            libxss-dev \
+            libasound2-dev \
+            libatspi2.0-0 \
+            libgtk-3-0 \
+            libgdk-pixbuf2.0-0 \
+            libxfixes3 \
+            libxinerama1 \
+            libxrandr2 \
+            libasound2 \
+            libpangocairo-1.0-0 \
+            libcairo-gobject2 \
+            libgdk-pixbuf2.0-0 \
+            libgtk-3-0 \
+            libgbm1
+            
+          # Set Chrome/Chromium environment for headless
+          export CHROME_BIN=/usr/bin/google-chrome-stable
+          export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
+          export PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+          
+          # Chrome memory ve resource limits
+          echo 'vm.max_map_count=262144' | sudo tee -a /etc/sysctl.conf
+          sudo sysctl -p
+          
+      - name: Setup Node.js 20 with enhanced config
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Run park.sh quietly (masked)
+          cache: 'npm'
+          
+      - name: Pre-install Node dependencies globally
+        run: |
+          # Global olarak hızlı install
+          npm install -g puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+          
+          # Puppeteer için Chrome download
+          npx puppeteer install chrome || npx puppeteer browsers install chrome
+          
+      - name: Setup virtual display for headless Chrome
+        run: |
+          # Xvfb kurulumu (headless display)
+          sudo apt-get install -y xvfb
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          
+      - name: Docker resource optimization
+        run: |
+          # Docker için sistem optimizasyonu
+          echo '{"log-level": "warn", "storage-driver": "overlay2"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          
+          # Memory limits
+          echo 'DefaultLimitNOFILE=65536' | sudo tee -a /etc/systemd/system.conf
+          
+      - name: Run enhanced park.sh quietly (masked)
         env:
           TARGET_URL: ${{ inputs.url }}
           COUNTRIES: ${{ inputs.countries }}
           RUNNER_INDEX: ${{ matrix.runner_index }}
+          HEADLESS_MODE: ${{ inputs.headless_mode }}
+          DISPLAY: :99
+          # Chrome optimization flags
+          CHROME_FLAGS: "--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --remote-debugging-port=9222"
+          # Puppeteer optimizations
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "false"
+          PUPPETEER_EXECUTABLE_PATH: "/usr/bin/google-chrome-stable"
+          # Memory management
+          NODE_OPTIONS: "--max-old-space-size=4096"
         shell: bash
         run: |
           set -e
+          
+          # Permissions
           chmod +x .priv/park.sh || true
-          ( set +x; .priv/park.sh > run.log 2>&1 ) &
-          pid=$!
-          while kill -0 "$pid" 2>/dev/null; do
-            echo "runner-${RUNNER_INDEX} running..."
+          
+          # Resource monitoring background process
+          (
+            while true; do
+              echo "[$(date)] Memory: $(free -h | grep ^Mem | awk '{print $3"/"$2}')"
+              echo "[$(date)] Docker: $(docker ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null | wc -l) containers"
+              sleep 300  # Her 5 dakika
+            done
+          ) &
+          monitor_pid=$!
+          
+          # Ana script'i çalıştır
+          ( set +x; timeout 6h .priv/park.sh > run.log 2>&1 ) &
+          main_pid=$!
+          
+          # Progress indicator
+          while kill -0 "$main_pid" 2>/dev/null; do
+            echo "[$(date)] runner-${RUNNER_INDEX} active... (PID: $main_pid)"
             sleep 300
           done
-          wait "$pid" || {
-            echo "----- SANITIZED LAST 200 LINES OF run.log -----"
-            tail -n 200 run.log \
+          
+          # Cleanup monitor
+          kill "$monitor_pid" 2>/dev/null || true
+          
+          # Wait for main process
+          wait "$main_pid" || {
+            echo "----- RUNNER ${RUNNER_INDEX} ERROR LOG (SANITIZED) -----"
+            tail -n 300 run.log \
               | sed -E 's#https?://[^[:space:]]+#[REDACTED_URL]#g' \
               | sed -E 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[REDACTED_IP]/g' \
-              | sed -E 's/'"$COUNTRIES"'/[REDACTED_COUNTRIES]/g'
+              | sed -E 's/'"$COUNTRIES"'/[REDACTED_COUNTRIES]/g' \
+              | grep -E "(Error|Failed|Exception|Timeout)" || echo "No specific errors found"
             exit 1
           }
-
-      - name: Secure cleanup (no artifacts)
+          
+      - name: Resource cleanup and monitoring
         if: always()
         run: |
+          # Container cleanup
+          docker ps -aq | head -20 | xargs -r docker rm -f || true
+          
+          # Process cleanup
+          pkill -f "chrome|chromium|node" || true
+          pkill -f "Xvfb" || true
+          
+          # Disk cleanup
+          docker system prune -f || true
+          sudo apt-get clean || true
+          
+          # Log cleanup
           shred -u run.log || rm -f run.log || true
+          
+          # Final resource report
+          echo "Final system state:"
+          echo "Memory: $(free -h | grep ^Mem)"
+          echo "Disk: $(df -h /)"
+          echo "Processes: $(ps aux | wc -l)"
